@@ -1,0 +1,257 @@
+// ─── Google Apps Script ─────────────────────────────────────────
+// Use two sheets: the active sheet for booth approvals,
+// and a sheet named "Raffle Entries" for raffle submissions.
+
+function doPost(e) {
+  try {
+    let data;
+    if (e.parameter && e.parameter.action) {
+      data = e.parameter;
+      if (data.booths) {
+        try { data.booths = JSON.parse(data.booths); } catch(_) {}
+      }
+    } else {
+      data = JSON.parse(e.postData.contents);
+    }
+    
+    const action = data.action;
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    
+    // Ensure headers on main sheet
+    if (sheet.getLastRow() === 0 || sheet.getRange(1, 1).getValue() !== 'Timestamp') {
+      sheet.appendRow([
+        'Timestamp', 'Participant Name', 'Full Name', 'Age', 'Phone',
+        'Email', 'Address', 'PC Express', 'PC Diy', 'Dlink', 'Asus', 'Raffle Submitted'
+      ]);
+    }
+
+    // ─── GET PARTICIPANT (creates row if not exists) ──────────
+    if (action === 'getParticipant') {
+      const name = data.name;
+      const dataRange = sheet.getDataRange();
+      const values = dataRange.getValues();
+      
+      let foundRow = -1;
+      for (let i = 1; i < values.length; i++) {
+        if (values[i][1] === name) {
+          foundRow = i;
+          break;
+        }
+      }
+      
+      if (foundRow === -1) {
+        const newRow = [
+          new Date().toISOString(),
+          name, '', '', '', '', '',
+          '❌', '❌', '❌', '❌', '❌'
+        ];
+        sheet.appendRow(newRow);
+        // Re-fetch
+        const newData = sheet.getDataRange().getValues();
+        for (let i = 1; i < newData.length; i++) {
+          if (newData[i][1] === name) {
+            foundRow = i;
+            break;
+          }
+        }
+      }
+      
+      if (foundRow === -1) {
+        return sendResponse({
+          success: true,
+          participant: { name, booths: { 'pc-express': false, 'pc-diy': false, 'dlink': false, 'asus': false }, raffleSubmitted: false, formData: null }
+        });
+      }
+      
+      const row = values[foundRow];
+      const booths = {
+        'pc-express': row[7] === '✅',
+        'pc-diy': row[8] === '✅',
+        'dlink': row[9] === '✅',
+        'asus': row[10] === '✅'
+      };
+      const raffleSubmitted = row[11] === '✅';
+      
+      return sendResponse({
+        success: true,
+        participant: {
+          name: name,
+          booths: booths,
+          raffleSubmitted: raffleSubmitted,
+          formData: raffleSubmitted ? {
+            fullName: row[2] || '',
+            age: row[3] || '',
+            phone: row[4] || '',
+            email: row[5] || '',
+            address: row[6] || '',
+            submittedAt: row[0] || ''
+          } : null
+        }
+      });
+    }
+
+    // ─── GET ALL PARTICIPANTS ────────────────────────────
+    if (action === 'getAllParticipants') {
+      const dataRange = sheet.getDataRange();
+      const values = dataRange.getValues();
+      const participants = [];
+      for (let i = 1; i < values.length; i++) {
+        const row = values[i];
+        if (row[1]) {
+          participants.push({
+            name: row[1],
+            booths: {
+              'pc-express': row[7] === '✅',
+              'pc-diy': row[8] === '✅',
+              'dlink': row[9] === '✅',
+              'asus': row[10] === '✅'
+            },
+            raffleSubmitted: row[11] === '✅'
+          });
+        }
+      }
+      return sendResponse({ success: true, participants: participants });
+    }
+
+    // ─── UPDATE BOOTH APPROVAL ───────────────────────────
+    if (action === 'updateApprovals') {
+      const name = data.name;
+      const boothKey = data.boothKey;
+      const approved = data.approved === 'true';
+      
+      const dataRange = sheet.getDataRange();
+      const values = dataRange.getValues();
+      let foundRow = -1;
+      for (let i = 1; i < values.length; i++) {
+        if (values[i][1] === name) {
+          foundRow = i;
+          break;
+        }
+      }
+      
+      const colMap = {
+        'pc-express': 8,
+        'pc-diy': 9,
+        'dlink': 10,
+        'asus': 11
+      };
+      
+      if (foundRow === -1) {
+        const newRow = [
+          new Date().toISOString(),
+          name, '', '', '', '', '',
+          '❌', '❌', '❌', '❌', '❌'
+        ];
+        const colIndex = colMap[boothKey] - 1;
+        newRow[colIndex] = approved ? '✅' : '❌';
+        sheet.appendRow(newRow);
+      } else {
+        const rowNum = foundRow + 1;
+        sheet.getRange(rowNum, colMap[boothKey]).setValue(approved ? '✅' : '❌');
+      }
+      
+      return sendResponse({ success: true });
+    }
+
+    // ─── ADD RAFFLE ENTRY ─────────────────────────────────
+    if (action === 'addRaffleEntry') {
+      const booths = data.booths ? JSON.parse(data.booths) : {};
+      
+      // Check if already submitted on main sheet
+      const mainData = sheet.getDataRange().getValues();
+      let foundRow = -1;
+      for (let i = 1; i < mainData.length; i++) {
+        if (mainData[i][1] === data.participantName) {
+          foundRow = i;
+          break;
+        }
+      }
+      
+      if (foundRow !== -1 && mainData[foundRow][11] === '✅') {
+        return sendResponse({ success: false, error: 'Already submitted raffle.' });
+      }
+
+      // --- Write to "Raffle Entries" sheet ---
+      const raffleSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Raffle Entries');
+      if (!raffleSheet) {
+        SpreadsheetApp.getActiveSpreadsheet().insertSheet('Raffle Entries');
+        const newSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Raffle Entries');
+        newSheet.appendRow([
+          'Timestamp', 'Participant Name', 'Full Name', 'Age', 'Phone',
+          'Email', 'Address', 'PC Express', 'PC Diy', 'Dlink', 'Asus', 'All Completed'
+        ]);
+      }
+      const targetSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Raffle Entries');
+      const allCompleted = Object.values(booths).every(v => v === true);
+      targetSheet.appendRow([
+        new Date().toISOString(),
+        data.participantName || '',
+        data.fullName || '',
+        data.age || '',
+        data.phone || '',
+        data.email || '',
+        data.address || '',
+        booths['pc-express'] ? '✅' : '❌',
+        booths['pc-diy'] ? '✅' : '❌',
+        booths['dlink'] ? '✅' : '❌',
+        booths['asus'] ? '✅' : '❌',
+        allCompleted ? '✅' : '❌'
+      ]);
+
+      // --- Update main sheet's Raffle Submitted to ✅ ---
+      if (foundRow === -1) {
+        const newRow = [
+          new Date().toISOString(),
+          data.participantName || '',
+          data.fullName || '',
+          data.age || '',
+          data.phone || '',
+          data.email || '',
+          data.address || '',
+          booths['pc-express'] ? '✅' : '❌',
+          booths['pc-diy'] ? '✅' : '❌',
+          booths['dlink'] ? '✅' : '❌',
+          booths['asus'] ? '✅' : '❌',
+          '✅'
+        ];
+        sheet.appendRow(newRow);
+      } else {
+        const rowNum = foundRow + 1;
+        sheet.getRange(rowNum, 2).setValue(data.participantName);
+        sheet.getRange(rowNum, 3).setValue(data.fullName);
+        sheet.getRange(rowNum, 4).setValue(data.age);
+        sheet.getRange(rowNum, 5).setValue(data.phone);
+        sheet.getRange(rowNum, 6).setValue(data.email);
+        sheet.getRange(rowNum, 7).setValue(data.address);
+        sheet.getRange(rowNum, 12).setValue('✅');
+      }
+      
+      return sendResponse({ success: true });
+    }
+
+    return sendResponse({ success: false, error: 'Unknown action: ' + action });
+    
+  } catch (error) {
+    return sendResponse({ success: false, error: error.toString() });
+  }
+}
+
+// ─── Handle GET requests ─────────────────────────────────
+function doGet(e) {
+  if (e && e.parameter && e.parameter.action) {
+    const fakePost = {
+      parameter: e.parameter,
+      postData: { contents: '' }
+    };
+    return doPost(fakePost);
+  }
+  return ContentService.createTextOutput(
+    '✅ Taiwan Excellence Passport Web App is running.\n' +
+    'Use GET or POST with action: getParticipant, getAllParticipants, updateApprovals, addRaffleEntry'
+  ).setMimeType(ContentService.MimeType.TEXT);
+}
+
+function sendResponse(data) {
+  return ContentService.createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
+}
